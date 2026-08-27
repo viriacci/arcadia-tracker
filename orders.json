@@ -1,0 +1,14 @@
+[
+  {
+    "id": "b12cdfe6-25d0-4508-a6f3-053dc6dc7271",
+    "title": "Nowe zlecenie",
+    "items": [
+      {
+        "name": "Cobblestone",
+        "stack_size": 64,
+        "target": 64,
+        "collected": 640
+      }
+    ]
+  }
+]
