@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-MC Zlecenia Tracker
-Aplikacja do śledzenia zleceń (kart) z blokami/itemami do zebrania w Minecraft.
+Arcadia Tracker
+Aplikacja do śledzenia zleceń z itemami/blokami do zebrania w Minecraft.
 Dark + gold glassmorphism, PySide6.
 """
 import sys
@@ -9,20 +9,20 @@ import json
 import os
 import uuid
 
-from PySide6.QtCore import Qt, QSize
-from PySide6.QtGui import QIcon, QFont
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QFont, QIntValidator
 from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-    QLabel, QPushButton, QLineEdit, QSpinBox, QScrollArea, QFrame, QDialog,
-    QFormLayout, QDialogButtonBox, QCompleter, QMessageBox, QSizePolicy,
-    QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QToolButton
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QLabel, QPushButton, QLineEdit, QSpinBox, QScrollArea, QFrame,
+    QDialog, QFormLayout, QDialogButtonBox, QCompleter, QMessageBox,
+    QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
+    QToolButton, QSizePolicy
 )
 
 from items_data import get_stack_size, known_item_names
 
-APP_TITLE = "MC Zlecenia Tracker"
+APP_TITLE = "Arcadia Tracker"
 DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "orders.json")
-ICONS_DIR = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "icons")
 
 GOLD = "#D4AF37"
 GOLD_SOFT = "#E9C25D"
@@ -41,20 +41,29 @@ QScrollArea {{
     border: none;
     background: transparent;
 }}
+QFrame#column {{
+    background-color: rgba(255, 255, 255, 8);
+    border: 1px solid rgba(212, 175, 55, 65);
+    border-radius: 12px;
+}}
 QFrame#card {{
     background-color: rgba(255, 255, 255, 18);
     border: 1px solid rgba(212, 175, 55, 120);
     border-radius: 14px;
 }}
-QLabel#cardTitle {{
+QLabel#columnTitle {{
     color: {GOLD};
     font-size: 17px;
-    font-weight: 600;
+    font-weight: 700;
 }}
 QLabel#header {{
     color: {GOLD};
     font-size: 22px;
     font-weight: 700;
+}}
+QLabel#progress {{
+    color: #cfc5aa;
+    font-size: 12px;
 }}
 QPushButton {{
     background-color: rgba(212, 175, 55, 40);
@@ -90,6 +99,9 @@ QLineEdit, QSpinBox {{
     padding: 4px 6px;
     color: #f0e6c8;
 }}
+QLineEdit#addAmount {{
+    min-width: 55px;
+}}
 QTableWidget {{
     background-color: rgba(0, 0, 0, 60);
     border: 1px solid rgba(212, 175, 55, 60);
@@ -116,6 +128,23 @@ def fmt_stacks(qty: int, stack_size: int) -> str:
     if stacks:
         return f"{stacks} st."
     return f"{rest}"
+
+
+def order_status(order_data: dict) -> str:
+    """Zwraca status zlecenia na podstawie zebranych itemów."""
+    items = order_data.get("items", [])
+    if not items:
+        return "accepted"
+
+    total_collected = sum(max(0, int(item.get("collected", 0))) for item in items)
+    if total_collected == 0:
+        return "accepted"
+
+    all_collected = all(
+        int(item.get("collected", 0)) >= int(item.get("target", 0))
+        for item in items
+    )
+    return "done" if all_collected else "in_progress"
 
 
 class AddItemDialog(QDialog):
@@ -165,12 +194,14 @@ class AddItemDialog(QDialog):
 
 
 class OrderCard(QFrame):
-    def __init__(self, order_data, on_delete, on_change):
+    def __init__(self, order_data, on_delete, on_change, on_status_change, on_handed_over):
         super().__init__()
         self.setObjectName("card")
         self.order_data = order_data
         self.on_delete = on_delete
         self.on_change = on_change
+        self.on_status_change = on_status_change
+        self.on_handed_over = on_handed_over
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(16, 14, 16, 14)
@@ -178,18 +209,24 @@ class OrderCard(QFrame):
 
         top = QHBoxLayout()
         self.title_edit = QLineEdit(order_data.get("title", "Zlecenie"))
-        self.title_edit.setObjectName("cardTitle")
         self.title_edit.setFont(QFont("Segoe UI", 14, QFont.Bold))
-        self.title_edit.setStyleSheet(f"border:none; background:transparent; color:{GOLD}; font-size:16px; font-weight:700;")
+        self.title_edit.setStyleSheet(
+            f"border:none; background:transparent; color:{GOLD}; "
+            "font-size:16px; font-weight:700;"
+        )
         self.title_edit.textChanged.connect(self._title_changed)
 
         del_btn = QToolButton()
-        del_btn.setText("Usuń zlecenie ✕")
+        del_btn.setText("Usuń ✕")
         del_btn.clicked.connect(lambda: self.on_delete(self))
 
         top.addWidget(self.title_edit, 1)
         top.addWidget(del_btn)
         outer.addLayout(top)
+
+        self.progress_label = QLabel()
+        self.progress_label.setObjectName("progress")
+        outer.addWidget(self.progress_label)
 
         self.table = QTableWidget(0, 9)
         self.table.setHorizontalHeaderLabels([
@@ -200,7 +237,7 @@ class OrderCard(QFrame):
         self.table.verticalHeader().setVisible(False)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setSelectionMode(QAbstractItemView.NoSelection)
-        self.table.setMinimumHeight(120)
+        self.table.setMinimumHeight(90)
         outer.addWidget(self.table)
 
         add_row = QHBoxLayout()
@@ -208,8 +245,13 @@ class OrderCard(QFrame):
         add_item_btn.clicked.connect(self.add_item_dialog)
         add_row.addWidget(add_item_btn)
         add_row.addStretch()
-        outer.addLayout(add_row)
 
+        if order_status(order_data) == "done":
+            handover_btn = QPushButton("Oddano")
+            handover_btn.clicked.connect(lambda: self.on_handed_over(self))
+            add_row.addWidget(handover_btn)
+
+        outer.addLayout(add_row)
         self.refresh_table()
 
     def _title_changed(self, text):
@@ -222,28 +264,50 @@ class OrderCard(QFrame):
             self.order_data["items"].append(dlg.get_data())
             self.refresh_table()
             self.on_change()
+            self.on_status_change(self.order_data)
 
     def remove_item(self, idx):
         del self.order_data["items"][idx]
         self.refresh_table()
         self.on_change()
+        self.on_status_change(self.order_data)
 
-    def add_collected(self, idx, spin):
-        amount = spin.value()
+    def add_collected(self, idx, amount_edit):
+        text = amount_edit.text().strip()
+        if not text:
+            return
+
+        try:
+            amount = int(text)
+        except ValueError:
+            return
+
         if amount <= 0:
             return
-        self.order_data["items"][idx]["collected"] += amount
-        spin.setValue(0)
+
+        self.order_data["items"][idx]["collected"] = (
+            int(self.order_data["items"][idx].get("collected", 0)) + amount
+        )
+        amount_edit.clear()
         self.refresh_table()
         self.on_change()
+        self.on_status_change(self.order_data)
 
     def refresh_table(self):
-        items = self.order_data["items"]
+        items = self.order_data.get("items", [])
         self.table.setRowCount(len(items))
+
+        total_target = sum(int(item.get("target", 0)) for item in items)
+        total_collected = sum(int(item.get("collected", 0)) for item in items)
+        progress = (total_collected / total_target * 100) if total_target else 0
+        self.progress_label.setText(
+            f"Postęp: {total_collected} / {total_target} szt. ({progress:.0f}%)"
+        )
+
         for row, item in enumerate(items):
-            stack = item["stack_size"]
-            target = item["target"]
-            collected = item["collected"]
+            stack = int(item["stack_size"])
+            target = int(item["target"])
+            collected = int(item.get("collected", 0))
             remaining = max(0, target - collected)
 
             self.table.setItem(row, 0, QTableWidgetItem(item["name"]))
@@ -256,18 +320,23 @@ class OrderCard(QFrame):
                 collected_item.setForeground(Qt.green)
             self.table.setItem(row, 4, collected_item)
 
-            # + dodaj: spinbox + button w jednej komórce
             cell = QWidget()
             cell_layout = QHBoxLayout(cell)
             cell_layout.setContentsMargins(2, 2, 2, 2)
-            spin = QSpinBox()
-            spin.setRange(0, 999999)
+
+            amount_edit = QLineEdit()
+            amount_edit.setObjectName("addAmount")
+            amount_edit.setPlaceholderText("Ilość")
+            amount_edit.setValidator(QIntValidator(1, 999999, amount_edit))
+            amount_edit.setAlignment(Qt.AlignRight)
+
             btn = QPushButton("Dodaj")
             btn.setFixedWidth(55)
-            cell_layout.addWidget(spin)
+            cell_layout.addWidget(amount_edit)
             cell_layout.addWidget(btn)
             self.table.setCellWidget(row, 5, cell)
-            btn.clicked.connect(lambda _, i=row, s=spin: self.add_collected(i, s))
+            btn.clicked.connect(lambda _, i=row, e=amount_edit: self.add_collected(i, e))
+            amount_edit.returnPressed.connect(lambda i=row, e=amount_edit: self.add_collected(i, e))
 
             rem_item = QTableWidgetItem(str(remaining))
             if remaining == 0:
@@ -279,7 +348,8 @@ class OrderCard(QFrame):
             del_cell.setText("✕")
             del_cell.clicked.connect(lambda _, i=row: self.remove_item(i))
             self.table.setCellWidget(row, 8, del_cell)
-        self.table.setColumnWidth(5, 130)
+
+        self.table.setColumnWidth(5, 145)
         self.table.setColumnWidth(8, 36)
         self.table.resizeRowsToContents()
         total_h = self.table.horizontalHeader().height() + sum(
@@ -288,21 +358,57 @@ class OrderCard(QFrame):
         self.table.setFixedHeight(max(60, total_h))
 
 
+class OrderColumn(QFrame):
+    def __init__(self, title):
+        super().__init__()
+        self.setObjectName("column")
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+
+        title_label = QLabel(title)
+        title_label.setObjectName("columnTitle")
+        layout.addWidget(title_label)
+
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+
+        self.container = QWidget()
+        self.cards_layout = QVBoxLayout(self.container)
+        self.cards_layout.setContentsMargins(2, 2, 2, 2)
+        self.cards_layout.setSpacing(10)
+        self.cards_layout.addStretch()
+        self.scroll.setWidget(self.container)
+        layout.addWidget(self.scroll)
+
+    def clear_cards(self):
+        while self.cards_layout.count() > 1:
+            item = self.cards_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+    def add_card(self, card):
+        self.cards_layout.insertWidget(self.cards_layout.count() - 1, card)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(APP_TITLE)
-        self.resize(1100, 750)
-
+        self.resize(1500, 850)
         self.orders = self.load_orders()
 
         central = QWidget()
         self.setCentralWidget(central)
         main_layout = QVBoxLayout(central)
         main_layout.setContentsMargins(20, 20, 20, 20)
+        main_layout.setSpacing(14)
 
         header_row = QHBoxLayout()
-        header = QLabel("⛏ MC Zlecenia Tracker")
+        header = QLabel("⛏ Arcadia Tracker")
         header.setObjectName("header")
         add_order_btn = QPushButton("+ Nowe zlecenie")
         add_order_btn.clicked.connect(self.add_order)
@@ -311,48 +417,74 @@ class MainWindow(QMainWindow):
         header_row.addWidget(add_order_btn)
         main_layout.addLayout(header_row)
 
-        self.scroll = QScrollArea()
-        self.scroll.setWidgetResizable(True)
-        self.cards_container = QWidget()
-        self.cards_layout = QVBoxLayout(self.cards_container)
-        self.cards_layout.setSpacing(14)
-        self.cards_layout.addStretch()
-        self.scroll.setWidget(self.cards_container)
-        main_layout.addWidget(self.scroll)
+        columns_row = QHBoxLayout()
+        columns_row.setSpacing(14)
 
-        self.card_widgets = []
+        self.columns = {
+            "accepted": OrderColumn("Zaakceptowano"),
+            "in_progress": OrderColumn("W trakcie"),
+            "done": OrderColumn("Gotowe"),
+        }
+        for column in self.columns.values():
+            columns_row.addWidget(column, 1)
+
+        main_layout.addLayout(columns_row, 1)
+        self.refresh_columns()
+
+    def refresh_columns(self):
+        for column in self.columns.values():
+            column.clear_cards()
+
         for order in self.orders:
-            self._add_card_widget(order)
+            status = order_status(order)
+            card = OrderCard(
+                order,
+                self.delete_order,
+                self.save_orders,
+                self._order_changed,
+                self.handed_over,
+            )
+            self.columns[status].add_card(card)
 
-    def _add_card_widget(self, order_data):
-        card = OrderCard(order_data, self.delete_order, self.save_orders)
-        self.cards_layout.insertWidget(self.cards_layout.count() - 1, card)
-        self.card_widgets.append(card)
+    def _order_changed(self, order_data):
+        self.save_orders()
+        self.refresh_columns()
 
     def add_order(self):
         order = {"id": str(uuid.uuid4()), "title": "Nowe zlecenie", "items": []}
         self.orders.append(order)
-        self._add_card_widget(order)
         self.save_orders()
+        self.refresh_columns()
 
     def delete_order(self, card):
         reply = QMessageBox.question(
-            self, "Usuń zlecenie", "Na pewno usunąć to zlecenie?",
-            QMessageBox.Yes | QMessageBox.No
+            self,
+            "Usuń zlecenie",
+            "Na pewno usunąć to zlecenie?",
+            QMessageBox.Yes | QMessageBox.No,
         )
         if reply != QMessageBox.Yes:
             return
+
         self.orders.remove(card.order_data)
-        self.card_widgets.remove(card)
-        card.setParent(None)
-        card.deleteLater()
         self.save_orders()
+        self.refresh_columns()
+
+    def handed_over(self, card):
+        # Archiwum nie jest jeszcze częścią Etapu 1. Przycisk jest celowo
+        # tylko punktem wejścia do tej funkcji, bez usuwania danych z orders.json.
+        QMessageBox.information(
+            self,
+            "Oddano",
+            "Zlecenie oznaczone jako oddane. Archiwum zostanie dodane w kolejnym etapie.",
+        )
 
     def load_orders(self):
         if os.path.exists(DATA_FILE):
             try:
                 with open(DATA_FILE, "r", encoding="utf-8") as f:
-                    return json.load(f)
+                    data = json.load(f)
+                    return data if isinstance(data, list) else []
             except Exception:
                 return []
         return []
