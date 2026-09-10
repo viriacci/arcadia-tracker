@@ -1,0 +1,40 @@
+name: Build La Peace Pricing
+
+on:
+  push:
+    branches:
+      - build/la-peace-pricing
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout build branch
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Restore app source
+        shell: pwsh
+        run: |
+          $b64 = Get-Content -Raw "build-assets/La-Peace-Pricing-source.b64"
+          [IO.File]::WriteAllBytes("La-Peace-Pricing-source.zip", [Convert]::FromBase64String($b64))
+          Expand-Archive -Path "La-Peace-Pricing-source.zip" -DestinationPath "." -Force
+
+      - name: Install dependencies
+        working-directory: la-peace-pricing
+        run: npm install
+
+      - name: Build portable EXE
+        working-directory: la-peace-pricing
+        run: npm run dist
+
+      - name: Upload EXE
+        uses: actions/upload-artifact@v4
+        with:
+          name: La-Peace-Pricing-Windows
+          path: la-peace-pricing/dist/*.exe
+          if-no-files-found: error
